@@ -1,0 +1,28 @@
+[project]
+name = "4pda-mcp"
+dynamic = ["version"]
+description = "MCP server exposing the 4PDA forum lofi (text) version: forums tree, topics, posts."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=2.1",
+  "impit>=0.6",
+]
+
+[project.scripts]
+4pda-mcp = "fourpda_mcp.server:main"
+
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+raw-options = { local_scheme = "no-local-version" }  # clean PEP 440 versions on tags
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fourpda_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "README.md", "LICENSE"]
