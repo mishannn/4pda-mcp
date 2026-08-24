@@ -18,7 +18,9 @@ async def _list_tools(ctx, params):
             description=(
                 "List 4PDA forum categories/subforums. With no forum_id, returns the "
                 "top-level categories (the forum tree roots). With a forum_id, returns "
-                "that forum's subforums and a summary of its topics. IDs are 4PDA forum IDs."
+                "that forum's subforums and a summary of its topics. IDs are 4PDA forum IDs.\n\n"
+                "On rate limit, returns a 'rate_limited' payload with retry_after_seconds "
+                "and retry_at_utc instead of an error — wait that long before calling again."
             ),
             inputSchema={
                 "type": "object",
@@ -34,7 +36,9 @@ async def _list_tools(ctx, params):
             name="list_topics",
             description=(
                 "List topics in a 4PDA forum (lofi version): id, title, reply count, "
-                "is_important (pinned/important topics are prefixed with (!) on the site)."
+                "is_important (pinned/important topics are prefixed with (!) on the site).\n\n"
+                "On rate limit, returns a 'rate_limited' payload with retry_after_seconds "
+                "and retry_at_utc instead of an error — wait that long before calling again."
             ),
             inputSchema={
                 "type": "object",
@@ -51,7 +55,9 @@ async def _list_tools(ctx, params):
                 "HTML body. Internal links to the full version are rewritten to their lofi "
                 "equivalent where one exists. The pinned header post repeats on every page "
                 "on the site; it is dropped on page >= 2. Pages are 1-indexed; each page has "
-                "20 posts."
+                "20 posts.\n\n"
+                "On rate limit, returns a 'rate_limited' payload with retry_after_seconds "
+                "and retry_at_utc instead of an error — wait that long before calling again."
             ),
             inputSchema={
                 "type": "object",
@@ -73,20 +79,27 @@ async def _call_tool(ctx, params):
     name = params.name
     args = params.arguments or {}
 
-    if name == "list_forums":
-        fid = args.get("forum_id")
-        result = forum.parse_categories() if fid is None else forum.parse_forum(int(fid))
-    elif name == "list_topics":
-        fid = int(args["forum_id"])
-        result = forum.parse_forum(fid)["topics"]
-    elif name == "list_posts":
-        tid = int(args["topic_id"])
-        page = int(args.get("page", 1))
-        result = forum.parse_topic(tid, page)
-    else:
+    try:
+        if name == "list_forums":
+            fid = args.get("forum_id")
+            result = forum.parse_categories() if fid is None else forum.parse_forum(int(fid))
+        elif name == "list_topics":
+            fid = int(args["forum_id"])
+            result = forum.parse_forum(fid)["topics"]
+        elif name == "list_posts":
+            tid = int(args["topic_id"])
+            page = int(args.get("page", 1))
+            result = forum.parse_topic(tid, page)
+        else:
+            return types.CallToolResult(
+                content=[types.TextContent(type="text", text=f"Unknown tool: {name}")],
+                isError=True,
+            )
+    except forum.RateLimited as rl:
+        # Not an error: tell the agent when to retry instead of hammering.
+        payload = forum.cooldown_payload(rl.retry_after)
         return types.CallToolResult(
-            content=[types.TextContent(type="text", text=f"Unknown tool: {name}")],
-            isError=True,
+            content=[types.TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, indent=2))],
         )
 
     return types.CallToolResult(

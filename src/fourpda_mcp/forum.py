@@ -2,10 +2,23 @@
 
 Cloudflare blocks plain HTTP clients; impit (Chrome TLS fingerprint) clears it.
 The lofi entry moved off `?index.html` — see README for the live URL format.
+
+Rate limiting: 4PDA fronts lofi with Cloudflare. The lofi endpoint is uncached,
+so each request hits origin and Cloudflare rate-limits it. When the limit trips
+the server returns HTTP 429 with a ``Retry-After`` header (seconds) — that is
+the authoritative "when can I ask again" signal. We layer a lightweight
+throttle on top so we rarely hit 429: a minimum interval between requests and a
+process-wide cooldown recorded from any 429 we do see. A 429 is *not* raised;
+the tool returns a structured ``rate_limited`` payload so the agent can wait and
+retry instead of hammering a blocked endpoint.
 """
 from __future__ import annotations
 
+import os
 import re
+import threading
+import time
+from datetime import datetime, timezone
 from html import unescape
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -18,7 +31,19 @@ FULL_IDX = f"{BASE}/index.php?act=idx"
 # Step between lofi topic pages (posts per page).
 PAGE_STEP = 20
 
+# --- rate limiting -----------------------------------------------------------
+# Cloudflare rate-limits the uncached lofi endpoint. No public quota is
+# published, so we stay conservative: enforce a minimum gap between requests
+# (env FOURPDA_MIN_INTERVAL, default 1.0s) and honour any 429's Retry-After.
+# Cap the cooldown at one hour so a pathological Retry-After can't freeze the
+# server process indefinitely.
+MIN_INTERVAL = float(os.environ.get("FOURPDA_MIN_INTERVAL", "1.0"))
+MAX_COOLDOWN = 3600  # seconds; cap a hostile/anomalous Retry-After
+
 _client: impit.Client | None = None
+_lock = threading.Lock()
+_last_request_ts: float = 0.0
+_cooldown_until: float = 0.0  # epoch seconds; 0 = no active cooldown
 
 
 def client() -> impit.Client:
@@ -28,9 +53,64 @@ def client() -> impit.Client:
     return _client
 
 
+class RateLimited(Exception):
+    """Raised when the upstream 429'd us; carries retry-after seconds."""
+
+    def __init__(self, retry_after: int, url: str):
+        self.retry_after = retry_after
+        self.url = url
+        super().__init__(f"4PDA rate-limited; retry in {retry_after}s")
+
+
+def rate_limited_until() -> float:
+    """Epoch seconds until which requests should not be attempted (0 = free)."""
+    return _cooldown_until
+
+
+def cooldown_payload(retry_after: int) -> dict:
+    """Structured payload a tool returns when the upstream is rate-limited."""
+    retry_at = datetime.fromtimestamp(time.time() + retry_after, tz=timezone.utc)
+    return {
+        "rate_limited": True,
+        "retry_after_seconds": retry_after,
+        "retry_at_utc": retry_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "hint": f"4PDA is rate-limiting requests. Retry after {retry_after}s.",
+    }
+
+
 def _q(url: str) -> str:
-    """Fetch a URL, returning decoded text (impit handles encoding)."""
+    """Fetch a URL with throttling. Raises RateLimited on HTTP 429.
+
+    Enforces a minimum interval between requests and refuses to send while a
+    429 cooldown is active (returning the cached cooldown as a RateLimited so
+    the caller surfaces it without burning a request).
+    """
+    global _last_request_ts, _cooldown_until
+    with _lock:
+        now = time.time()
+        # If we're in a known cooldown, don't even ask the server.
+        if _cooldown_until > now:
+            remaining = int(_cooldown_until - now)
+            raise RateLimited(max(remaining, 1), url)
+        # Minimum interval between requests (proactive throttle).
+        wait = MIN_INTERVAL - (now - _last_request_ts)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request_ts = time.time()
+
     r = client().get(url)
+
+    if r.status_code == 429:
+        # Retry-After is authoritative; default to a sane fallback if absent.
+        try:
+            retry_after = int(r.headers.get("retry-after", "60"))
+        except ValueError:
+            retry_after = 60
+        retry_after = min(max(retry_after, 1), MAX_COOLDOWN)
+        with _lock:
+            _cooldown_until = time.time() + retry_after
+        raise RateLimited(retry_after, url)
+
     if r.status_code != 200:
         raise RuntimeError(f"4PDA returned {r.status_code} for {url}")
     return r.text
