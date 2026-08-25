@@ -37,7 +37,7 @@ PAGE_STEP = 20
 # (env FOURPDA_MIN_INTERVAL, default 1.0s) and honour any 429's Retry-After.
 # Cap the cooldown at one hour so a pathological Retry-After can't freeze the
 # server process indefinitely.
-MIN_INTERVAL = float(os.environ.get("FOURPDA_MIN_INTERVAL", "1.0"))
+MIN_INTERVAL = float(os.environ.get("FOURPDA_MIN_INTERVAL", "2.0"))
 MAX_COOLDOWN = 3600  # seconds; cap a hostile/anomalous Retry-After
 
 _client: impit.Client | None = None
