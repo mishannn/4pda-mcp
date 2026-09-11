@@ -2,8 +2,8 @@
 
 FROM python:3.12-slim
 
-#impit ships manylinux/musllinux wheels (amd64+arm64), so no Rust toolchain is needed.
-COPY --from=ghcr.io/astral-sh/uv/uv:latest /uv /usr/local/bin/uv
+# impit ships manylinux/musllinux wheels (amd64+arm64), so no Rust toolchain is needed.
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
