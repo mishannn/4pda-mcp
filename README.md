@@ -34,12 +34,58 @@ The pinned header post repeats on every topic page; this server drops it on page
 
 ```bash
 pip install -e .
-4pda-mcp            # stdio MCP server
-# or: mcp run src/fourpda_mcp/server.py
+4pda-mcp            # stdio MCP server (default)
+4pda-mcp --http     # streamable HTTP server at 127.0.0.1:8000/mcp
 ```
+
+HTTP mode options: `--host` (default `127.0.0.1`), `--port` (default `8000`).
+The HTTP endpoint serves stateless JSON-mode MCP at `/mcp` (GET is not
+supported — the server sends no notifications; DELETE/PUT return 405).
 
 No browser, no auth needed (read-only public content). impit impersonates Chrome to
 clear Cloudflare.
+
+### Environment variables
+
+| Variable              | Default | Meaning                                                                 |
+| --------------------- | ------- | ----------------------------------------------------------------------- |
+| `FOURPDA_MIN_INTERVAL`| `2.0`   | Minimum seconds between upstream 4PDA requests (proactive throttle).   |
+| `FOURPDA_API_KEY`     | unset   | When set, HTTP requests must carry `Authorization: Bearer <key>`.      |
+
+`FOURPDA_API_KEY` applies only to `--http` mode (stdio has no headers and is
+trusted). Without it the HTTP endpoint accepts unauthenticated requests.
+Wrong or missing token → `401` with `WWW-Authenticate: Bearer realm="4pda-mcp"`.
+
+Client config example (streamable HTTP + bearer):
+
+```json
+{
+  "mcpServers": {
+    "4pda": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp",
+      "headers": { "Authorization": "Bearer <your-key>" }
+    }
+  }
+}
+```
+
+### Docker
+
+```bash
+# build locally
+docker build -t 4pda-mcp .
+
+# run without auth on port 8000
+docker run -p 8000:8000 4pda-mcp
+
+# run with a bearer key
+docker run -p 8000:8000 -e FOURPDA_API_KEY=your-secret 4pda-mcp
+```
+
+Prebuilt multi-arch images (linux/amd64, linux/arm64) are published to GHCR:
+`ghcr.io/mishannn/4pda-mcp` — tagged `latest`/`1`/`1.2`/`1.2.3` on releases
+and `main` on every push to main.
 
 ## Rate limiting
 

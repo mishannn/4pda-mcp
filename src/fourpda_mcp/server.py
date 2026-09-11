@@ -1,7 +1,15 @@
-"""MCP server: 4PDA lofi forum tools (stdio transport)."""
+"""MCP server: 4PDA lofi forum tools (stdio and streamable HTTP transports).
+
+HTTP mode (``4pda-mcp --http``) serves stateless JSON-mode MCP at ``/mcp``.
+Set ``FOURPDA_API_KEY`` to require ``Authorization: Bearer <key>`` on every
+request; without it the HTTP endpoint is unauthenticated.
+"""
 from __future__ import annotations
 
+import contextlib
+import hmac
 import json
+import os
 
 import mcp.types as types
 from mcp.server.lowlevel import Server
@@ -9,6 +17,49 @@ from mcp.server.lowlevel import Server
 from . import forum
 
 server = Server("4pda-mcp")
+
+API_KEY = os.environ.get("FOURPDA_API_KEY", "").strip() or None
+
+
+class _BearerAuthMiddleware:
+    """ASGI middleware: reject requests whose bearer token is not the env key.
+
+    Installed only when FOURPDA_API_KEY is set; stdio is trusted as before.
+    """
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers", [])}
+        auth = headers.get("authorization", "")
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else None
+        if token is None or not hmac.compare_digest(token.encode(), API_KEY.encode()):
+            await self._unauthorized(send)
+            return
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _unauthorized(send):
+        body = json.dumps({
+            "jsonrpc": "2.0", "id": None, "error": {
+                "code": -32000, "message": "Unauthorized: missing or invalid bearer token.",
+            },
+        }).encode()
+        await send({
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode()),
+                (b"www-authenticate", b'Bearer realm="4pda-mcp"'),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
 
 
 async def _list_tools(ctx, params):
@@ -111,9 +162,58 @@ server.add_request_handler("tools/list", types.PaginatedRequestParams, _list_too
 server.add_request_handler("tools/call", types.CallToolRequestParams, _call_tool)
 
 
+def _serve_http(host: str, port: int) -> None:
+    import uvicorn
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+
+    manager = StreamableHTTPSessionManager(
+        app=server, json_response=True, stateless=True,
+    )
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app):
+        async with manager.run():
+            yield
+
+    class McpEndpoint:
+        async def __call__(self, scope, receive, send):
+            await manager.handle_request(scope, receive, send)
+
+    endpoint = McpEndpoint()
+    if API_KEY:
+        endpoint = _BearerAuthMiddleware(endpoint)  # type: ignore[assignment]
+
+    app = Starlette(
+        routes=[Route("/mcp", endpoint=endpoint, methods=["GET", "POST", "PUT", "DELETE"])],
+        lifespan=lifespan,
+    )
+
+    config = uvicorn.Config(app, host=host, port=port, lifespan="on")
+    uvicorn.Server(config).run()
+
+
 def main() -> None:
+    import argparse
     import asyncio
     from mcp.server.stdio import stdio_server
+
+    parser = argparse.ArgumentParser(
+        prog="4pda-mcp",
+        description="4PDA lofi MCP server. Default transport is stdio; pass --http for streamable HTTP.",
+    )
+    parser.add_argument("--http", action="store_true",
+                        help="serve via streamable HTTP instead of stdio")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="HTTP bind address (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8000,
+                        help="HTTP bind port (default: 8000)")
+    args = parser.parse_args()
+
+    if args.http:
+        _serve_http(args.host, args.port)
+        return
 
     async def run():
         async with stdio_server() as (read, write):
